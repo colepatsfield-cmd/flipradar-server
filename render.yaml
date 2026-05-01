@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: flipradar-proxy
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: RAPIDAPI_KEY
+        value: 95a7aaa1cbmsh8dd155d3f15c9b5p1788e8jsnbe9c38d76c56
+      - key: PORT
+        value: 3001
