@@ -15,40 +15,40 @@ app.get("/", (req, res) => {
 });
 
 // ── POST to Zillow search ─────────────────────────────────────────────────────
-async function searchZillow(location, status = "for_sale", page = 0) {
+async function searchZillow(location, status = "for_sale", page = 1) {
   const url = `https://${ZILLOW_HOST}/search/address`;
   const body = {
     page,
     status,
     location,
-    min_price: {},
-    max_price: {},
-    min_beds: {},
-    min_baths: {},
-    min_sqft: {},
-    max_sqft: {},
-    min_lot_size: {},
-    year_built_min: {},
-    year_built_max: {},
-    has_pool: {},
-    has_garage: {},
-    keywords: {},
-    single_story: {},
-    has_3d_tour: {},
-    has_open_house: {},
-    is_coming_soon: {},
-    is_foreclosure: {},
-    is_fsbo: {},
-    is_new_construction: {},
-    has_basement: {},
-    has_ac: {},
-    is_waterfront: {},
-    parking_spots: {},
-    days_on_zillow: {},
-    min_school_rating: {},
-    is_55_plus: {},
-    max_hoa: {},
-    only_price_reduction: {},
+    min_price: null,
+    max_price: null,
+    min_beds: null,
+    min_baths: null,
+    min_sqft: null,
+    max_sqft: null,
+    min_lot_size: null,
+    year_built_min: null,
+    year_built_max: null,
+    has_pool: null,
+    has_garage: null,
+    keywords: null,
+    single_story: null,
+    has_3d_tour: null,
+    has_open_house: null,
+    is_coming_soon: null,
+    is_foreclosure: null,
+    is_fsbo: null,
+    is_new_construction: null,
+    has_basement: null,
+    has_ac: null,
+    is_waterfront: null,
+    parking_spots: null,
+    days_on_zillow: null,
+    min_school_rating: null,
+    is_55_plus: null,
+    max_hoa: null,
+    only_price_reduction: null,
   };
 
   console.log(`[FETCH] POST ${url} | location=${location} status=${status}`);
@@ -152,9 +152,9 @@ app.get("/search", async (req, res) => {
       forSale = listings.map(r => normalize(r, "zillow"));
       console.log(`[FOR SALE] ✓ ${forSale.length} listings`);
 
-      // Try page 1 for more
+      // Try page 2 for more
       try {
-        const { body: body2 } = await searchZillow(location, "for_sale", 1);
+        const { body: body2 } = await searchZillow(location, "for_sale", 2);
         const more = extractListings(body2);
         if (more.length > 0) {
           forSale = [...forSale, ...more.map(r => normalize(r, "zillow"))];
