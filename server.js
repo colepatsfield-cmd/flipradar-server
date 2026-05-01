@@ -1,9 +1,8 @@
-const express = require("express");
+onst express = require("express");
 const cors = require("cors");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-
 app.use(cors());
 app.use(express.json());
 
@@ -11,10 +10,9 @@ const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || "95a7aaa1cbmsh8dd155d3f15c9b5p1
 const ZILLOW_HOST = "unofficial-zillow-api2.p.rapidapi.com";
 
 app.get("/", (req, res) => {
-  res.json({ status: "FlipRadar Proxy Running", version: "3.0.0" });
+  res.json({ status: "FlipRadar Proxy Running", version: "4.0.0" });
 });
 
-// ── POST to Zillow search ─────────────────────────────────────────────────────
 async function searchZillow(location, status = "for_sale", page = 1) {
   const url = `https://${ZILLOW_HOST}/search/address`;
   const body = {
@@ -50,8 +48,7 @@ async function searchZillow(location, status = "for_sale", page = 1) {
     max_hoa: null,
     only_price_reduction: null,
   };
-
-  console.log(`[FETCH] POST ${url} | location=${location} status=${status}`);
+  console.log(`[FETCH] POST ${url} | location=${location} status=${status} page=${page}`);
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -61,14 +58,12 @@ async function searchZillow(location, status = "for_sale", page = 1) {
     },
     body: JSON.stringify(body),
   });
-
   const text = await res.text();
   console.log(`[STATUS] ${res.status} | [PREVIEW] ${text.slice(0, 400)}`);
   try { return { status: res.status, body: JSON.parse(text) }; }
   catch (e) { return { status: res.status, body: text }; }
 }
 
-// ── Extract listings from any response shape ──────────────────────────────────
 function extractListings(body) {
   if (!body) return [];
   if (Array.isArray(body)) return body;
@@ -83,7 +78,6 @@ function extractListings(body) {
   return [];
 }
 
-// ── Normalize to common shape ─────────────────────────────────────────────────
 function normalize(raw, source) {
   const hi = raw.hdpData?.homeInfo || {};
   const g = (...keys) => {
@@ -93,24 +87,20 @@ function normalize(raw, source) {
     }
     return null;
   };
-
-  const rawPrice = raw.unformattedPrice || raw.price || raw.listPrice ||
-    raw.soldPrice || raw.last_sold_price || hi.price || hi.soldPrice || 0;
-  const price = typeof rawPrice === "string"
-    ? parseInt(rawPrice.replace(/[^0-9]/g, "")) : (rawPrice || 0);
-
+  const rawPrice = raw.unformattedPrice || raw.price || raw.listPrice || raw.soldPrice || raw.last_sold_price || hi.price || hi.soldPrice || 0;
+  const price = typeof rawPrice === "string" ? parseInt(rawPrice.replace(/[^0-9]/g, "")) : (rawPrice || 0);
   return {
     source,
     address:      raw.address || raw.streetAddress || raw.street_address || hi.streetAddress || "Unknown",
     city:         g("city") || "",
     state:        g("state") || "",
-    zip:          g("zipcode", "zip", "postalCode", "postal_code") || "",
+    zip:          g("zipcode","zip","postalCode","postal_code") || "",
     price,
-    sqft:         g("livingArea", "sqft", "living_area", "finishedSqFt") || 0,
-    beds:         g("beds", "bedrooms", "bedroom") || 0,
-    baths:        g("baths", "bathrooms", "bathroom") || 0,
-    yearBuilt:    g("yearBuilt", "year_built") || 0,
-    daysOnMarket: g("daysOnMarket", "days_on_market", "timeOnZillow") || 0,
+    sqft:         g("livingArea","sqft","living_area","finishedSqFt") || 0,
+    beds:         g("beds","bedrooms","bedroom") || 0,
+    baths:        g("baths","bathrooms","bathroom") || 0,
+    yearBuilt:    g("yearBuilt","year_built") || 0,
+    daysOnMarket: g("daysOnMarket","days_on_market","timeOnZillow") || 0,
     zestimate:    g("zestimate") || 0,
     imgSrc:       raw.imgSrc || raw.image || raw.img_src || raw.carouselPhotos?.[0]?.url || null,
     detailUrl:    raw.detailUrl || raw.detail_url || raw.hdpUrl || null,
@@ -119,16 +109,16 @@ function normalize(raw, source) {
   };
 }
 
-// ── DEBUG endpoint ────────────────────────────────────────────────────────────
 app.get("/debug", async (req, res) => {
   const { location = "Cameron Park CA" } = req.query;
   try {
-    const { status, body } = await searchZillow(location, "for_sale", 0);
+    const { status, body } = await searchZillow(location, "for_sale", 1);
+    const listings = extractListings(body);
     res.json({
       status,
       topLevelKeys: typeof body === "object" ? Object.keys(body) : "not-json",
-      listingsFound: extractListings(body).length,
-      firstListing: extractListings(body)[0] || null,
+      listingsFound: listings.length,
+      firstListing: listings[0] || null,
       preview: JSON.stringify(body).slice(0, 1000),
     });
   } catch (e) {
@@ -136,73 +126,53 @@ app.get("/debug", async (req, res) => {
   }
 });
 
-// ── MAIN SEARCH ───────────────────────────────────────────────────────────────
 app.get("/search", async (req, res) => {
   const { location } = req.query;
   if (!location) return res.status(400).json({ error: "location param required" });
-
   const errors = [];
   let forSale = [], sold = [];
 
-  // Fetch for-sale listings (pages 0 and 1 for more results)
   try {
-    const { status, body } = await searchZillow(location, "for_sale", 0);
+    const { status, body } = await searchZillow(location, "for_sale", 1);
     const listings = extractListings(body);
     if (listings.length > 0) {
       forSale = listings.map(r => normalize(r, "zillow"));
-      console.log(`[FOR SALE] ✓ ${forSale.length} listings`);
-
-      // Try page 2 for more
+      console.log(`[FOR SALE p1] ${forSale.length} listings`);
       try {
-        const { body: body2 } = await searchZillow(location, "for_sale", 2);
-        const more = extractListings(body2);
+        const { body: b2 } = await searchZillow(location, "for_sale", 2);
+        const more = extractListings(b2);
         if (more.length > 0) {
           forSale = [...forSale, ...more.map(r => normalize(r, "zillow"))];
-          console.log(`[FOR SALE page 2] +${more.length} more`);
+          console.log(`[FOR SALE p2] +${more.length}`);
         }
-      } catch (e2) { /* page 2 optional */ }
+      } catch (_) {}
     } else {
-      errors.push(`for_sale status=${status}, keys=${typeof body==="object"?Object.keys(body).join(","):"raw"}, preview=${JSON.stringify(body).slice(0,200)}`);
+      errors.push(`for_sale: status=${status}, keys=${typeof body==="object"?Object.keys(body).join(","):"raw"}, preview=${JSON.stringify(body).slice(0,300)}`);
     }
-  } catch (e) {
-    errors.push(`for_sale error: ${e.message}`);
-  }
+  } catch (e) { errors.push(`for_sale error: ${e.message}`); }
 
-  // Fetch recently sold for comps
   try {
-    const { status, body } = await searchZillow(location, "recently_sold", 0);
+    const { body } = await searchZillow(location, "recently_sold", 1);
     const listings = extractListings(body);
     if (listings.length > 0) {
       sold = listings.map(r => normalize(r, "zillow-sold"));
-      console.log(`[SOLD] ✓ ${sold.length} comps`);
+      console.log(`[SOLD] ${sold.length} comps`);
     }
-  } catch (e) {
-    errors.push(`sold error: ${e.message}`);
-  }
+  } catch (e) { errors.push(`sold: ${e.message}`); }
 
-  // Avg $/sqft from comps
   const psfs = sold.filter(s => s.price && s.sqft).map(s => s.price / s.sqft);
-  const avgPsf = psfs.length ? Math.round(psfs.reduce((a, b) => a + b, 0) / psfs.length) : 0;
+  const avgPsf = psfs.length ? Math.round(psfs.reduce((a,b)=>a+b,0)/psfs.length) : 0;
 
-  // Deduplicate
   const seen = new Set();
   const deduped = forSale.filter(p => {
-    const key = `${p.address}${p.price}`.toLowerCase().replace(/\s/g, "");
+    const key = `${p.address}${p.price}`.toLowerCase().replace(/\s/g,"");
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
   console.log(`[RESULT] ${deduped.length} for-sale, ${sold.length} comps, $${avgPsf}/sqft`);
-
-  res.json({
-    location,
-    forSale: deduped,
-    sold,
-    avgPsf,
-    sources: { zillow: deduped.length, soldComps: sold.length },
-    errors,
-  });
+  res.json({ location, forSale: deduped, sold, avgPsf, sources: { zillow: deduped.length, soldComps: sold.length }, errors });
 });
 
-app.listen(PORT, () => console.log(`FlipRadar proxy v3 on port ${PORT}`));
+app.listen(PORT, () => console.log(`FlipRadar proxy v4 on port ${PORT}`));
