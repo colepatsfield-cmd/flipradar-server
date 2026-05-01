@@ -1,44 +1,41 @@
 const express = require("express");
 const cors = require("cors");
-// Node 18+ has fetch built-in — no import needed
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ── CORS: allow requests from any origin (your FlipRadar app) ─────────────────
 app.use(cors());
 app.use(express.json());
 
-// ── Your RapidAPI key (set as env var on Render, or paste here for testing) ───
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || "95a7aaa1cbmsh8dd155d3f15c9b5p1788e8jsnbe9c38d76c56";
+const ZILLOW_HOST = "real-estate-zillow-com.p.rapidapi.com";
 
-// ── Health check ──────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.json({ status: "FlipRadar Proxy Running", version: "1.0.0" });
+  res.json({ status: "FlipRadar Proxy Running", version: "2.0.0" });
 });
 
-// ── Helper: call RapidAPI ────────────────────────────────────────────────────
-async function rapidFetch(host, path) {
-  const url = `https://${host}${path}`;
+async function zillowFetch(path) {
+  const url = `https://${ZILLOW_HOST}${path}`;
+  console.log(`[FETCH] ${url}`);
   const res = await fetch(url, {
     headers: {
-      "x-rapidapi-host": host,
+      "x-rapidapi-host": ZILLOW_HOST,
       "x-rapidapi-key": RAPIDAPI_KEY,
-      "Content-Type": "application/json",
     },
   });
-  const body = await res.json();
-  return { status: res.status, ok: res.ok, body };
+  const text = await res.text();
+  console.log(`[STATUS] ${res.status} | [PREVIEW] ${text.slice(0, 300)}`);
+  try { return { status: res.status, body: JSON.parse(text) }; }
+  catch (e) { return { status: res.status, body: text }; }
 }
 
-// ── Helper: extract listings from any response shape ─────────────────────────
 function extractListings(body) {
   if (!body) return [];
-  for (const key of ["results","listings","data","homes","props","properties","items","searchResults"]) {
+  if (Array.isArray(body)) return body;
+  for (const key of ["results","listings","data","homes","props","properties","items","searchResults","list"]) {
     if (Array.isArray(body[key]) && body[key].length > 0) return body[key];
   }
-  if (Array.isArray(body) && body.length > 0) return body;
-  if (body.data) {
+  if (body.data && typeof body.data === "object") {
     for (const key of ["results","listings","homes","props","properties"]) {
       if (Array.isArray(body.data[key]) && body.data[key].length > 0) return body.data[key];
     }
@@ -46,179 +43,125 @@ function extractListings(body) {
   return [];
 }
 
-// ── Helper: normalize a listing to a common shape ─────────────────────────────
 function normalize(raw, source) {
   const hi = raw.hdpData?.homeInfo || {};
-  const get = (...keys) => {
+  const g = (...keys) => {
     for (const k of keys) {
       const v = raw[k] ?? hi[k];
-      if (v !== undefined && v !== null) return v;
+      if (v !== undefined && v !== null && v !== 0 && v !== "") return v;
     }
     return null;
   };
+  const rawPrice = raw.unformattedPrice || raw.price || raw.listPrice || raw.soldPrice || hi.price || hi.soldPrice || 0;
+  const price = typeof rawPrice === "string" ? parseInt(rawPrice.replace(/[^0-9]/g,"")) : rawPrice;
 
   return {
     source,
-    address:      get("address","streetAddress") || "Unknown Address",
-    city:         get("city") || "",
-    state:        get("state") || "",
-    zip:          get("zipcode","zip") || "",
-    price:        get("price","listPrice","unformattedPrice","soldPrice") || 0,
-    sqft:         get("livingArea","sqft","lotArea") || 0,
-    beds:         get("beds","bedrooms") || 0,
-    baths:        get("baths","bathrooms") || 0,
-    yearBuilt:    get("yearBuilt") || 0,
-    daysOnMarket: get("daysOnMarket","timeOnZillow") || 0,
-    zestimate:    get("zestimate") || 0,
+    address:      raw.address || raw.streetAddress || hi.streetAddress || "Unknown",
+    city:         g("city") || "",
+    state:        g("state") || "",
+    zip:          g("zipcode","zip","postalCode") || "",
+    price,
+    sqft:         g("livingArea","sqft","finishedSqFt") || 0,
+    beds:         g("beds","bedrooms") || 0,
+    baths:        g("baths","bathrooms") || 0,
+    yearBuilt:    g("yearBuilt") || 0,
+    daysOnMarket: g("daysOnMarket","timeOnZillow") || 0,
+    zestimate:    g("zestimate") || 0,
     imgSrc:       raw.imgSrc || raw.image || raw.carouselPhotos?.[0]?.url || null,
     detailUrl:    raw.detailUrl || raw.hdpUrl || null,
-    statusType:   raw.statusType || raw.homeStatus || "FOR_SALE",
-    lat:          get("latitude","lat") || null,
-    lng:          get("longitude","lng","lon") || null,
+    statusType:   raw.statusType || "FOR_SALE",
+    zpid:         g("zpid") || null,
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ROUTE: GET /search?location=Cameron+Park+CA
-// Calls Zillow + Realtor.com in parallel, merges, deduplicates
-// ─────────────────────────────────────────────────────────────────────────────
+// ── DEBUG: visit /debug?location=Cameron+Park+CA in browser to see raw API response
+app.get("/debug", async (req, res) => {
+  const { location = "Cameron Park CA" } = req.query;
+  const loc = encodeURIComponent(location);
+  const debug = {};
+
+  const endpoints = [
+    `/v1/search/for_sale?location_or_rid=${loc}&property_types=house&sort=relevant&page=1`,
+    `/v1/search/sold?location_or_rid=${loc}&property_types=house&sort=relevant&page=1&doz=90`,
+    `/propertyExtendedSearch?location=${loc}&status_type=ForSale&home_type=Houses`,
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const { status, body } = await zillowFetch(ep);
+      debug[ep] = {
+        status,
+        topLevelKeys: typeof body === "object" ? Object.keys(body) : "not-json",
+        listingsFound: extractListings(body).length,
+        preview: JSON.stringify(body).slice(0, 600),
+      };
+    } catch(e) {
+      debug[ep] = { error: e.message };
+    }
+  }
+  res.json(debug);
+});
+
+// ── MAIN SEARCH
 app.get("/search", async (req, res) => {
   const { location } = req.query;
   if (!location) return res.status(400).json({ error: "location param required" });
 
   const loc = encodeURIComponent(location);
-  const results = { forSale: [], sold: [], errors: [] };
+  const errors = [];
+  let forSale = [], sold = [];
 
-  // ── Source 1: Zillow (real-estate-zillow-com) ─────────────────────────────
-  const zillowEndpoints = [
+  const saleEndpoints = [
     `/v1/search/for_sale?location_or_rid=${loc}&property_types=house&sort=relevant&page=1`,
-    `/v2/search/for_sale?location=${loc}&home_type=Houses&page=1`,
-    `/search/for_sale?location=${loc}&home_type=Houses`,
     `/propertyExtendedSearch?location=${loc}&status_type=ForSale&home_type=Houses`,
+    `/v1/search/for_sale?location_or_rid=${loc}&sort=days&page=1`,
   ];
 
-  let zillowForSale = [];
-  for (const ep of zillowEndpoints) {
+  for (const ep of saleEndpoints) {
     try {
-      const { ok, status, body } = await rapidFetch("real-estate-zillow-com.p.rapidapi.com", ep);
+      const { status, body } = await zillowFetch(ep);
       const listings = extractListings(body);
       if (listings.length > 0) {
-        zillowForSale = listings.map(r => normalize(r, "zillow"));
-        console.log(`[Zillow] ${zillowForSale.length} for-sale listings via ${ep}`);
+        forSale = listings.map(r => normalize(r, "zillow"));
+        console.log(`[FOR SALE] ✓ ${forSale.length} from ${ep}`);
         break;
       }
-    } catch (e) {
-      results.errors.push(`Zillow for_sale: ${e.message}`);
-    }
+      errors.push(`${ep} → ${status}, keys: ${typeof body==="object"?Object.keys(body).join(","):"raw"}`);
+    } catch (e) { errors.push(`${ep} → ${e.message}`); }
   }
 
-  // ── Source 2: Zillow sold comps ───────────────────────────────────────────
-  let zillowSold = [];
-  try {
-    const soldEps = [
-      `/v1/search/sold?location_or_rid=${loc}&property_types=house&sort=relevant&page=1&doz=90`,
-      `/v2/search/sold?location=${loc}&home_type=Houses`,
-    ];
-    for (const ep of soldEps) {
-      const { ok, body } = await rapidFetch("real-estate-zillow-com.p.rapidapi.com", ep);
-      const listings = extractListings(body);
-      if (listings.length > 0) {
-        zillowSold = listings.map(r => normalize(r, "zillow-sold"));
-        console.log(`[Zillow Sold] ${zillowSold.length} comps`);
-        break;
-      }
-    }
-  } catch (e) {
-    results.errors.push(`Zillow sold: ${e.message}`);
-  }
-
-  // ── Source 3: Realtor.com via RapidAPI ────────────────────────────────────
-  let realtorListings = [];
-  const realtorEndpoints = [
-    `/properties/v3/list?location=${loc}&status[]=for_sale&type[]=single_family&limit=20`,
-    `/properties/list?location=${loc}&status_type=ForSale&prop_type=single_family&limit=20`,
-    `/v1/properties/list?location=${loc}&status=ForSale&prop_type=house&limit=20`,
+  const soldEndpoints = [
+    `/v1/search/sold?location_or_rid=${loc}&property_types=house&sort=relevant&page=1&doz=90`,
+    `/propertyExtendedSearch?location=${loc}&status_type=RecentlySold&home_type=Houses`,
   ];
-  for (const ep of realtorEndpoints) {
+
+  for (const ep of soldEndpoints) {
     try {
-      const { ok, body } = await rapidFetch("realtor16.p.rapidapi.com", ep);
+      const { status, body } = await zillowFetch(ep);
       const listings = extractListings(body);
       if (listings.length > 0) {
-        realtorListings = listings.map(r => normalize(r, "realtor"));
-        console.log(`[Realtor] ${realtorListings.length} listings`);
+        sold = listings.map(r => normalize(r, "zillow-sold"));
+        console.log(`[SOLD] ✓ ${sold.length} comps`);
         break;
       }
-    } catch (e) {
-      results.errors.push(`Realtor: ${e.message}`);
-    }
+    } catch (e) { errors.push(`Sold: ${e.message}`); }
   }
 
-  // ── Source 4: Zillow56 (alternate Zillow API) ─────────────────────────────
-  let zillow56Listings = [];
-  try {
-    const ep56 = `/search?location=${loc}&status_type=ForSale&home_type=Houses&page=1`;
-    const { ok, body } = await rapidFetch("zillow56.p.rapidapi.com", ep56);
-    const listings = extractListings(body);
-    if (listings.length > 0) {
-      zillow56Listings = listings.map(r => normalize(r, "zillow56"));
-      console.log(`[Zillow56] ${zillow56Listings.length} listings`);
-    }
-  } catch (e) {
-    results.errors.push(`Zillow56: ${e.message}`);
-  }
+  const psfs = sold.filter(s => s.price && s.sqft).map(s => s.price / s.sqft);
+  const avgPsf = psfs.length ? Math.round(psfs.reduce((a,b)=>a+b,0)/psfs.length) : 0;
 
-  // ── Merge + deduplicate by address ────────────────────────────────────────
-  const allForSale = [...zillowForSale, ...realtorListings, ...zillow56Listings];
   const seen = new Set();
-  const deduped = allForSale.filter(p => {
-    const key = `${p.address}-${p.price}`.toLowerCase().replace(/\s/g, "");
+  const deduped = forSale.filter(p => {
+    const key = `${p.address}${p.price}`.toLowerCase().replace(/\s/g,"");
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
-  // ── Calculate avg $/sqft from sold comps ──────────────────────────────────
-  const psfs = zillowSold
-    .filter(s => s.price && s.sqft)
-    .map(s => s.price / s.sqft);
-  const avgPsf = psfs.length
-    ? Math.round(psfs.reduce((a, b) => a + b, 0) / psfs.length)
-    : 0;
+  console.log(`[RESULT] ${deduped.length} for-sale, ${sold.length} comps, $${avgPsf}/sqft, errors: ${errors.length}`);
 
-  console.log(`[Result] ${deduped.length} total listings, ${zillowSold.length} comps, avgPsf=$${avgPsf}`);
-
-  res.json({
-    location,
-    forSale: deduped,
-    sold: zillowSold,
-    avgPsf,
-    sources: {
-      zillow: zillowForSale.length,
-      realtor: realtorListings.length,
-      zillow56: zillow56Listings.length,
-      soldComps: zillowSold.length,
-    },
-    errors: results.errors,
-  });
+  res.json({ location, forSale: deduped, sold, avgPsf, sources: { zillow: deduped.length, soldComps: sold.length }, errors });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ROUTE: GET /property?zpid=12345  — single property detail
-// ─────────────────────────────────────────────────────────────────────────────
-app.get("/property", async (req, res) => {
-  const { zpid } = req.query;
-  if (!zpid) return res.status(400).json({ error: "zpid param required" });
-  try {
-    const { body } = await rapidFetch(
-      "real-estate-zillow-com.p.rapidapi.com",
-      `/v1/property?zpid=${zpid}`
-    );
-    res.json(body);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`FlipRadar proxy running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`FlipRadar proxy v2 on port ${PORT}`));
