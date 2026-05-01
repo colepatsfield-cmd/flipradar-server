@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const fetch = require("node-fetch");
+// Node 18+ has fetch built-in — no import needed
 
 const app = express();
 const PORT = process.env.PORT || 3001;
